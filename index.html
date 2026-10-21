@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Penampil Soal</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --tx:#1c1f24; --ac:#2563eb; --ok:#16a34a; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --card:#1f2228; --tx:#e8eaed; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--tx);
+         -webkit-user-select:none; user-select:none; }
+  .box { max-width:380px; margin:14vh auto; padding:24px; background:var(--card); border-radius:14px; }
+  input, button { width:100%; padding:12px; margin-top:10px; font-size:16px; border-radius:8px; border:1px solid #8884; }
+  button { background:var(--ac); color:#fff; border:0; cursor:pointer; }
+  button:disabled { opacity:.6; }
+  #err { color:var(--bad); margin-top:10px; min-height:1.2em; }
+  #viewer { display:none; }
+  #bar { position:sticky; top:0; z-index:5; padding:8px 14px; background:var(--card);
+         display:flex; justify-content:space-between; font-size:14px; }
+  #pages { padding:12px; display:flex; flex-direction:column; align-items:center; gap:12px; }
+  canvas { max-width:100%; box-shadow:0 2px 8px #0003; background:#fff; }
+  #answer { max-width:900px; margin:8px auto 40px; padding:0 12px; }
+  #answer button { background:var(--ok); font-weight:600; }
+  #lock { display:none; position:fixed; inset:0; background:var(--bg); z-index:10;
+          align-items:center; justify-content:center; text-align:center; padding:24px; }
+  @media print { body { display:none !important; } }
+</style>
+</head>
+<body>
+
+<div class="box" id="login">
+  <h2>Penampil Soal</h2>
+  <input id="token" placeholder="Masukkan token" autocomplete="off">
+  <button id="go">Buka</button>
+  <div id="err"></div>
+  <p style="font-size:13px;opacity:.7">Layar akan masuk mode penuh. Berpindah tab/jendela dicatat dan dapat mengunci akses.</p>
+</div>
+
+<div id="viewer">
+  <div id="bar"><span>Soal</span><span id="warn"></span></div>
+  <div id="pages"></div>
+  <div id="answer">
+    <button id="finish">Masukkan jawaban</button>
+    <div id="err2" style="color:var(--bad);margin-top:8px;min-height:1.2em"></div>
+  </div>
+</div>
+
+<div id="lock"><div><h2>Akses terkunci</h2><p>Terlalu banyak pelanggaran tercatat. Hubungi guru.</p></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+// ====== KONFIGURASI ======
+const API_URL = 'GANTI_DENGAN_URL_WEB_APP_APPS_SCRIPT';
+const MAX_PELANGGARAN = 3;
+// =========================
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const $ = id => document.getElementById(id);
+let S = { token:'', sesi:'', on:false, v:0, last:0 };
+
+async function api(body, keepalive) {
+  const res = await fetch(API_URL, {
+    method:'POST', keepalive: !!keepalive,
+    headers:{ 'Content-Type':'text/plain;charset=utf-8' }, // hindari preflight CORS
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+const sendLog = (event, detail) => {
+  if (!S.sesi) return;
+  api({ action:'log', token:S.token, sesi:S.sesi, event, detail }, true).catch(()=>{});
+};
+
+$('go').onclick = async () => {
+  const token = $('token').value.trim();
+  $('err').textContent = '';
+  if (!token) { $('err').textContent = 'Token wajib diisi.'; return; }
+  $('go').disabled = true; $('go').textContent = 'Memuat…';
+  try { await document.documentElement.requestFullscreen?.(); } catch (e) {} // harus dari klik pengguna
+  try {
+    const r = await api({ action:'open', token });
+    if (!r.ok) throw new Error(r.error || 'Gagal.');
+    S = { ...S, token, sesi: r.sesi, v:0 };
+    await render(r.pdf);
+    $('login').style.display = 'none';
+    $('viewer').style.display = 'block';
+    S.last = Date.now() + 1500; // jeda awal agar tidak langsung terhitung
+    S.on = true;
+  } catch (e) {
+    $('err').textContent = e.message || 'Gagal memuat.';
+    if (document.fullscreenElement) document.exitFullscreen();
+  }
+  $('go').disabled = false; $('go').textContent = 'Buka';
+};
+
+// Tombol "Masukkan jawaban": link gform baru diminta ke server saat ini
+$('finish').onclick = async () => {
+  if (!S.on) return;
+  if (!confirm('Pindah ke formulir jawaban? Soal tidak dapat dibuka lagi setelah ini.')) return;
+  $('finish').disabled = true; $('err2').textContent = '';
+  try {
+    const r = await api({ action:'finish', token:S.token, sesi:S.sesi });
+    if (!r.ok) throw new Error(r.error || 'Gagal.');
+    S.on = false;                       // hentikan deteksi agar perpindahan tidak dihitung pelanggaran
+    $('pages').innerHTML = '';
+    window.location.href = r.url;       // tab yang sama
+  } catch (e) {
+    $('err2').textContent = e.message || 'Gagal. Coba lagi.';
+    $('finish').disabled = false;
+  }
+};
+
+async function render(b64) {
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const wrap = $('pages'); wrap.innerHTML = '';
+  const width = Math.min(window.innerWidth - 24, 900);
+  const dpr = window.devicePixelRatio || 1;
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const page = await pdf.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: (width / base.width) * dpr });
+    const c = document.createElement('canvas');
+    c.width = vp.width; c.height = vp.height;
+    c.style.width = (vp.width / dpr) + 'px';
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    watermark(c.getContext('2d'), c.width, c.height, dpr);
+    wrap.appendChild(c);
+  }
+}
+
+// Watermark (token + waktu) digambar LANGSUNG di canvas, jadi ikut terambil pada setiap tangkapan
+function watermark(ctx, w, h, dpr) {
+  const teks = S.token + ' · ' + new Date().toLocaleString('id-ID');
+  ctx.save();
+  ctx.globalAlpha = 0.16; ctx.fillStyle = '#d00';
+  ctx.font = (14 * dpr) + 'px sans-serif';
+  ctx.rotate(-Math.PI / 6);
+  const stepX = ctx.measureText(teks).width + 60 * dpr, stepY = 90 * dpr;
+  for (let y = -h; y < h * 1.5; y += stepY)
+    for (let x = -w; x < w * 1.5; x += stepX) ctx.fillText(teks, x, y);
+  ctx.restore();
+}
+
+// ====== DETEKSI PELANGGARAN ======
+function pelanggaran(alasan) {
+  if (!S.on) return;
+  const now = Date.now();
+  if (now - S.last < 1200) return;      // debounce (blur + visibilitychange datang bersamaan)
+  S.last = now; S.v++;
+  sendLog('PELANGGARAN', alasan + ' #' + S.v);
+  $('warn').textContent = 'Peringatan ' + S.v + '/' + MAX_PELANGGARAN;
+  if (S.v >= MAX_PELANGGARAN) kunci();
+  else alert('Peringatan ' + S.v + ' dari ' + MAX_PELANGGARAN + ': ' + alasan +
+             '. Pelanggaran berikutnya dapat mengunci akses.');
+}
+function kunci() {
+  S.on = false;
+  sendLog('KUNCI', 'batas pelanggaran');
+  $('pages').innerHTML = '';            // hapus data tampilan dari DOM
+  $('viewer').style.display = 'none';
+  $('lock').style.display = 'flex';
+  if (document.fullscreenElement) document.exitFullscreen();
+}
+
+document.addEventListener('visibilitychange', () => { if (document.hidden) pelanggaran('Pindah tab/aplikasi'); });
+window.addEventListener('blur', () => pelanggaran('Jendela kehilangan fokus'));
+document.addEventListener('fullscreenchange', () => { if (S.on && !document.fullscreenElement) pelanggaran('Keluar dari layar penuh'); });
+
+['contextmenu','copy','cut','paste','dragstart','selectstart'].forEach(ev =>
+  document.addEventListener(ev, e => e.preventDefault()));
+
+document.addEventListener('keydown', e => {
+  if (!S.on) return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && ['p','s','c','a','u','x'].includes(k)) { e.preventDefault(); pelanggaran('Pintasan terlarang'); }
+  if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && ['i','j','c'].includes(k))) { e.preventDefault(); pelanggaran('Upaya membuka DevTools'); }
+});
+document.addEventListener('keyup', e => {
+  if (S.on && e.key === 'PrintScreen') {
+    navigator.clipboard?.writeText('').catch(()=>{});
+    pelanggaran('Tombol PrintScreen');
+  }
+});
+</script>
+</body>
+</html>
