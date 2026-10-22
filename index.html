@@ -24,6 +24,11 @@
   #answer button { background:var(--ok); font-weight:600; }
   #lock { display:none; position:fixed; inset:0; background:var(--bg); z-index:10;
           align-items:center; justify-content:center; text-align:center; padding:24px; }
+  #modal { display:none; position:fixed; inset:0; z-index:20; background:#0007; align-items:center; justify-content:center; padding:20px; }
+  .mbox { background:var(--card); border-radius:12px; padding:20px; max-width:360px; width:100%; }
+  .mrow { display:flex; gap:10px; }
+  .mrow button { margin-top:6px; }
+  button.alt { background:#8885; color:var(--tx); }
   @media print { body { display:none !important; } }
 </style>
 </head>
@@ -31,6 +36,7 @@
 
 <div class="box" id="login">
   <h2>Penampil Soal</h2>
+  <input id="nama" placeholder="Nama lengkap" autocomplete="off">
   <input id="token" placeholder="Masukkan token" autocomplete="off">
   <button id="go">Buka</button>
   <div id="err"></div>
@@ -46,12 +52,14 @@
   </div>
 </div>
 
+<div id="modal"><div class="mbox"><p id="mmsg"></p><div class="mrow"><button id="mno" class="alt">Batal</button><button id="myes">OK</button></div></div></div>
+
 <div id="lock"><div><h2>Akses terkunci</h2><p>Terlalu banyak pelanggaran tercatat. Hubungi guru.</p></div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 // ====== KONFIGURASI ======
-const API_URL = 'https://script.google.com/macros/s/AKfycbzFDPo3PhGnfXnIeo1QX5FxbhgsT4t2iyxy6ddt77lYpE-Rc_aatNpTJ1CmpbJXXo3P/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbz_3-l9Mh2ZQpeCk_7nZPjD_QHfgOsBcWZtKaNYCVlKL7qX1HmrqVMyA4BcCmXbAbb6/exec';
 const MAX_PELANGGARAN = 3;
 // =========================
 
@@ -59,7 +67,24 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 const $ = id => document.getElementById(id);
-let S = { token:'', sesi:'', on:false, v:0, last:0 };
+let S = { token:'', nama:'', sesi:'', on:false, v:0, last:0 };
+
+// Dialog di dalam halaman (alert/confirm bawaan browser memicu blur dan dihitung sebagai pindah tab)
+let _dlg = null;
+function dialog(pesan, ya, tidak) {
+  if (_dlg) _dlg(false);
+  return new Promise(res => {
+    _dlg = res;
+    $('mmsg').textContent = pesan;
+    $('myes').textContent = ya || 'OK';
+    $('mno').textContent = tidak || '';
+    $('mno').style.display = tidak ? '' : 'none';
+    $('modal').style.display = 'flex';
+    const tutup = v => { $('modal').style.display = 'none'; _dlg = null; res(v); };
+    $('myes').onclick = () => tutup(true);
+    $('mno').onclick = () => tutup(false);
+  });
+}
 
 async function api(body, keepalive) {
   const res = await fetch(API_URL, {
@@ -71,19 +96,19 @@ async function api(body, keepalive) {
 }
 const sendLog = (event, detail) => {
   if (!S.sesi) return;
-  api({ action:'log', token:S.token, sesi:S.sesi, event, detail }, true).catch(()=>{});
+  api({ action:'log', token:S.token, sesi:S.sesi, nama:S.nama, event, detail }, true).catch(()=>{});
 };
 
 $('go').onclick = async () => {
-  const token = $('token').value.trim();
+  const nama = $('nama').value.trim(), token = $('token').value.trim();
   $('err').textContent = '';
-  if (!token) { $('err').textContent = 'Token wajib diisi.'; return; }
+  if (!nama || !token) { $('err').textContent = 'Nama dan token wajib diisi.'; return; }
   $('go').disabled = true; $('go').textContent = 'Memuat…';
   try { await document.documentElement.requestFullscreen?.(); } catch (e) {} // harus dari klik pengguna
   try {
-    const r = await api({ action:'open', token });
+    const r = await api({ action:'open', token, nama });
     if (!r.ok) throw new Error(r.error || 'Gagal.');
-    S = { ...S, token, sesi: r.sesi, v:0 };
+    S = { ...S, token, nama: r.nama, sesi: r.sesi, v:0 };
     await render(r.pdf);
     $('login').style.display = 'none';
     $('viewer').style.display = 'block';
@@ -99,17 +124,19 @@ $('go').onclick = async () => {
 // Tombol "Masukkan jawaban": link gform baru diminta ke server saat ini
 $('finish').onclick = async () => {
   if (!S.on) return;
-  if (!confirm('Pindah ke formulir jawaban? Soal tidak dapat dibuka lagi setelah ini.')) return;
+  const yakin = await dialog('Pindah ke formulir jawaban? Soal tidak dapat dibuka lagi setelah ini.', 'Ya, lanjut', 'Batal');
+  if (!yakin) return;
+  S.on = false;                         // jeda deteksi sebelum navigasi
   $('finish').disabled = true; $('err2').textContent = '';
   try {
-    const r = await api({ action:'finish', token:S.token, sesi:S.sesi });
+    const r = await api({ action:'finish', token:S.token, sesi:S.sesi, nama:S.nama });
     if (!r.ok) throw new Error(r.error || 'Gagal.');
-    S.on = false;                       // hentikan deteksi agar perpindahan tidak dihitung pelanggaran
     $('pages').innerHTML = '';
     window.location.href = r.url;       // tab yang sama
   } catch (e) {
     $('err2').textContent = e.message || 'Gagal. Coba lagi.';
     $('finish').disabled = false;
+    S.last = Date.now() + 1500; S.on = true;   // lanjutkan deteksi
   }
 };
 
@@ -135,7 +162,7 @@ async function render(b64) {
 
 // Watermark (token + waktu) digambar LANGSUNG di canvas, jadi ikut terambil pada setiap tangkapan
 function watermark(ctx, w, h, dpr) {
-  const teks = S.token + ' · ' + new Date().toLocaleString('id-ID');
+  const teks = S.nama + ' · ' + S.token + ' · ' + new Date().toLocaleString('id-ID');
   ctx.save();
   ctx.globalAlpha = 0.16; ctx.fillStyle = '#d00';
   ctx.font = (14 * dpr) + 'px sans-serif';
@@ -155,13 +182,14 @@ function pelanggaran(alasan) {
   sendLog('PELANGGARAN', alasan + ' #' + S.v);
   $('warn').textContent = 'Peringatan ' + S.v + '/' + MAX_PELANGGARAN;
   if (S.v >= MAX_PELANGGARAN) kunci();
-  else alert('Peringatan ' + S.v + ' dari ' + MAX_PELANGGARAN + ': ' + alasan +
-             '. Pelanggaran berikutnya dapat mengunci akses.');
+  else dialog('Peringatan ' + S.v + ' dari ' + MAX_PELANGGARAN + ': ' + alasan +
+              '. Pelanggaran berikutnya dapat mengunci akses.', 'Mengerti');
 }
 function kunci() {
   S.on = false;
   sendLog('KUNCI', 'batas pelanggaran');
   $('pages').innerHTML = '';            // hapus data tampilan dari DOM
+  $('modal').style.display = 'none';
   $('viewer').style.display = 'none';
   $('lock').style.display = 'flex';
   if (document.fullscreenElement) document.exitFullscreen();
